@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { parseWhere } from '../src/core/config.ts'
+import { parseListConfig, parseWhere } from '../src/core/config.ts'
 import { getAt, parsePath } from '../src/core/path.ts'
 import {
   groupRecords,
@@ -42,8 +42,26 @@ describe('paths', () => {
     expect(getAt(data, parsePath('missing.status'))).toBeUndefined()
   })
 
-  test('a Bases property id reads as the field it names', () => {
-    expect(parsePath('note.wild.status')).toEqual(['wild', 'status'])
+  test('a Bases property id in a sort or groupBy reads as the field it names', () => {
+    const settings = parseListConfig(
+      (key) =>
+        ({
+          sort: [{ property: 'note.wild.status', direction: 'ASC' }],
+          groupBy: { property: 'note.note.kind', direction: 'DESC' },
+        })[key],
+    )
+    expect(settings.sort).toEqual([{ path: ['wild', 'status'], direction: 'ASC' }])
+    expect(settings.groupBy).toEqual({ path: ['note', 'kind'], direction: 'DESC' })
+  })
+
+  test('a field named note is a path step like any other outside property ids', () => {
+    const notes = [
+      record('n1', { name: 'Open', note: { status: 'open' } }),
+      record('n2', { name: 'Bare', status: 'open' }),
+    ]
+    const where = parseWhere({ 'note.status': 'open' })
+    expect(names(notes.filter((item) => matchesWhere(item, where)))).toEqual(['Open'])
+    expect(parsePath('note.status')).toEqual(['note', 'status'])
   })
 })
 
@@ -135,11 +153,18 @@ describe('where operators', () => {
     expect(kept({ 'tiers.1': { present: true } })).toEqual(['Unknown'])
   })
 
-  test('is is the plain form, and unknown operators or empty operands add no test', () => {
+  test('is is the plain form, and unknown operators or malformed bounds add no test', () => {
     expect(parseWhere({ activity: { is: 'Hike' } })).toEqual(parseWhere({ activity: 'Hike' }))
-    expect(parseWhere({ activity: { near: 'Hike', contains: [] }, stars: { min: 'x' } })).toEqual([
+    expect(parseWhere({ activity: { near: 'Hike' }, stars: { min: 'x', max: {} } })).toEqual([
       { path: ['stars'], test: { kind: 'min', value: 'x' } },
     ])
+  })
+
+  test('an empty list of allowed values keeps no record', () => {
+    expect(kept({ activity: [] })).toEqual([])
+    expect(kept({ activity: { is: [] } })).toEqual([])
+    expect(kept({ activity: { contains: [] } })).toEqual([])
+    expect(kept({ activity: { not: [] } })).toEqual(['Ski Tour', 'Scramble', 'Walk', 'Unknown'])
   })
 })
 

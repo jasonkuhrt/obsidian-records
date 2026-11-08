@@ -87,6 +87,24 @@ describe('loadSource', () => {
     expect(loaded.problems).toEqual([{ file: 'nowhere', message: 'not found' }])
   })
 
+  test('a source that can’t be stat’ed or listed is a problem, not an error', async () => {
+    const fs = memoryFs({ 'set/a.json': '{"name":"A"}' })
+    const denied = async (path: string): Promise<never> => {
+      throw new Error(`EACCES: permission denied, '${path}'`)
+    }
+    const problem = { file: 'set', message: "EACCES: permission denied, 'set'" }
+    expect(await loadSource({ ...fs, stat: denied }, parseYaml, 'set')).toEqual({
+      source: 'set',
+      records: [],
+      problems: [problem],
+    })
+    expect(await loadSource({ ...fs, list: denied }, parseYaml, 'set')).toEqual({
+      source: 'set',
+      records: [],
+      problems: [problem],
+    })
+  })
+
   test('a source path is read the same with ./, a leading slash or a trailing one', async () => {
     const fs = memoryFs({ 'set/a.json': '{"name":"A"}' })
     const loaded = await Promise.all(

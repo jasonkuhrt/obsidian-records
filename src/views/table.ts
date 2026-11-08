@@ -46,7 +46,7 @@ export class TableView extends ListView {
     this.list = this.virtual
   }
 
-  protected override render(): void {
+  protected override draw(): void {
     if (this.noteConfig()) this.virtual.scrollToTop()
     const settings = this.settings()
     const fields = this.fields(settings)

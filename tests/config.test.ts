@@ -1,6 +1,11 @@
 import { describe, expect, test } from 'bun:test'
 import { parse as parseYaml } from 'yaml'
-import { defaultTrackZoom, parseListConfig, parseMapConfig } from '../src/core/config.ts'
+import {
+  defaultTrackZoom,
+  parseListConfig,
+  parseMapConfig,
+  viewSetting,
+} from '../src/core/config.ts'
 import { geometryOf, pointOf } from '../src/core/geo.ts'
 
 /** A view's entry in a `.base` file, read the way `BasesViewConfig.get` reads it. */
@@ -54,6 +59,30 @@ title: label
     expect(settings.order).toEqual([])
     expect(settings.where).toEqual([])
     expect(settings.title).toEqual(['label'])
+  })
+
+  test('a view without an order shows the records’ own fields, not Bases’ default column', () => {
+    /**
+     * A view's config as Obsidian 1.15's Bases builds it: `order` holds the
+     * entry's order as property ids, and `getOrder()` answers an entry
+     * without one with Bases' default, `["file.name"]`.
+     */
+    const basesConfig = (order?: readonly string[]) => ({
+      name: 'Campgrounds',
+      order,
+      getOrder(): string[] {
+        return this.order === undefined ? ['file.name'] : [...this.order]
+      },
+      getSort: () => [],
+      get: (key: string): unknown => (key === 'source' ? 'data' : undefined),
+    })
+    const orderOf = (config: ReturnType<typeof basesConfig>) =>
+      parseListConfig((key) => viewSetting(config, key)).order
+    expect(orderOf(basesConfig())).toEqual([])
+    expect(orderOf(basesConfig(['note.name', 'note.note.status']))).toEqual([
+      ['name'],
+      ['note', 'status'],
+    ])
   })
 
   test('a view without a source says so with null', () => {

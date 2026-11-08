@@ -113,10 +113,25 @@ const mapLimit = async <A, B>(
 const errorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : String(error)
 
+/** The data files a source names, in name order; a problem when it can't be found or read. */
+const filesOf = async (fs: SourceFs, source: string): Promise<string[] | SourceProblem> => {
+  try {
+    const stat = await fs.stat(source)
+    if (stat === null) return { file: source, message: 'not found' }
+    if (stat.type === 'file') return [source]
+    return (await fs.list(source)).files
+      .filter((file) => dataFile.test(file))
+      .toSorted((a, b) => a.localeCompare(b))
+  } catch (error) {
+    return { file: source, message: errorMessage(error) }
+  }
+}
+
 /**
  * Read a view's `source`: a folder of `.json`, `.yaml` or `.yml` files, one
  * record each, or one such file. Files load in name order, so rows have a
- * stable order before any sort.
+ * stable order before any sort. Whatever can't be read is a problem the view
+ * reports; loading never fails.
  */
 export const loadSource = async (
   fs: SourceFs,
@@ -124,15 +139,8 @@ export const loadSource = async (
   rawSource: string,
 ): Promise<LoadedSource> => {
   const source = normalizeSource(rawSource)
-  const stat = await fs.stat(source)
-  if (stat === null)
-    return { source, records: [], problems: [{ file: source, message: 'not found' }] }
-  const files =
-    stat.type === 'file'
-      ? [source]
-      : (await fs.list(source)).files
-          .filter((file) => dataFile.test(file))
-          .toSorted((a, b) => a.localeCompare(b))
+  const files = await filesOf(fs, source)
+  if (!Array.isArray(files)) return { source, records: [], problems: [files] }
   const loaded = await mapLimit(files, readConcurrency, async (file) => {
     try {
       return recordsOf(file, parse(file, await fs.read(file), parseYaml))

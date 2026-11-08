@@ -1,8 +1,30 @@
-import { isPlainObject, parsePath, type Path } from './path.ts'
+import { isPlainObject, parsePath, parsePropertyId, type Path } from './path.ts'
 import type { Direction, Scalar, SortKey, Test, Where, WhereCondition } from './query.ts'
 
 /** Reads one key of a view's entry in the `.base` file, as `BasesViewConfig.get` does. */
 export type ConfigGet = (key: string) => unknown
+
+/** The part of Bases' `BasesViewConfig` a view's entry is read through. */
+export interface BasesConfig {
+  readonly name: string
+  get(key: string): unknown
+  getSort(): readonly unknown[]
+}
+
+/**
+ * One key of a view's entry in the `.base` file. Bases keeps `order`, `sort`
+ * and `groupBy` apart from a view's other keys, as property ids such as
+ * `note.name`. `sort` has a getter. `order` and `groupBy` are read from the
+ * fields Bases keeps them in: `groupBy` has no public getter, and
+ * `getOrder()` answers a view without an `order` with Bases' own default,
+ * `["file.name"]`, which names no record field.
+ */
+export const viewSetting = (config: BasesConfig, key: string): unknown => {
+  if (key === 'name') return config.name
+  if (key === 'sort') return config.getSort()
+  if (key === 'order' || key === 'groupBy') return Reflect.get(config, key)
+  return config.get(key)
+}
 
 export interface ListConfig {
   readonly source: string | null
@@ -52,24 +74,30 @@ export interface MapConfig {
 const asString = (value: unknown): string | null =>
   typeof value === 'string' && value.trim() !== '' ? value.trim() : null
 
-const asPaths = (value: unknown): Path[] => {
-  if (typeof value === 'string') return [parsePath(value)].filter((path) => path.length > 0)
+/**
+ * Field paths written as text, one or a list. `parse` reads each: a view's
+ * own keys hold paths, and `order`, `sort` and `groupBy` hold Bases property
+ * ids.
+ */
+const asPaths = (value: unknown, parse: (text: string) => Path = parsePath): Path[] => {
+  if (typeof value === 'string') return [parse(value)].filter((path) => path.length > 0)
   if (!Array.isArray(value)) return []
-  return value.flatMap((item) => asPaths(item))
+  return value.flatMap((item) => asPaths(item, parse))
 }
 
-const asPath = (value: unknown): Path | null => asPaths(value)[0] ?? null
+const asPath = (value: unknown, parse: (text: string) => Path = parsePath): Path | null =>
+  asPaths(value, parse)[0] ?? null
 
 const asDirection = (value: unknown): Direction =>
   typeof value === 'string' && value.toUpperCase() === 'DESC' ? 'DESC' : 'ASC'
 
 const asSortKey = (value: unknown): SortKey | null => {
   if (typeof value === 'string') {
-    const path = asPath(value)
+    const path = asPath(value, parsePropertyId)
     return path === null ? null : { path, direction: 'ASC' }
   }
   if (!isPlainObject(value)) return null
-  const path = asPath(value['property'])
+  const path = asPath(value['property'], parsePropertyId)
   return path === null ? null : { path, direction: asDirection(value['direction']) }
 }
 
@@ -99,16 +127,15 @@ const asBound = (value: unknown): number | string | null =>
 const asTests = (operators: Record<string, unknown>): Test[] =>
   Object.entries(operators).flatMap(([operator, operand]): Test[] => {
     switch (operator) {
+      // An empty list names no value, so `is` and `contains` keep no record and `not` every one.
       case 'is':
-      case 'not': {
-        const values = asScalars(operand)
-        return values.length === 0 ? [] : [{ kind: operator, values }]
-      }
+      case 'not':
+        return [{ kind: operator, values: asScalars(operand) }]
       case 'contains': {
         const texts = asScalars(operand).flatMap((item) =>
           item === null || item === '' ? [] : [String(item)],
         )
-        return texts.length === 0 ? [] : [{ kind: 'contains', texts }]
+        return [{ kind: 'contains', texts }]
       }
       case 'min':
       case 'max': {
@@ -134,8 +161,7 @@ export const parseWhere = (value: unknown): Where => {
     const path = parsePath(key)
     if (path.length === 0) return []
     if (isPlainObject(expected)) return asTests(expected).map((test) => ({ path, test }))
-    const values = asScalars(expected)
-    return values.length === 0 ? [] : [{ path, test: { kind: 'is', values } }]
+    return [{ path, test: { kind: 'is', values: asScalars(expected) } }]
   })
 }
 
@@ -162,7 +188,7 @@ const defaultTitle: Path = ['name']
 
 export const parseListConfig = (get: ConfigGet): ListConfig => ({
   source: asString(get('source')),
-  order: asPaths(get('order')),
+  order: asPaths(get('order'), parsePropertyId),
   sort: parseSort(get('sort')),
   groupBy: parseGroupBy(get('groupBy')),
   where: parseWhere(get('where')),

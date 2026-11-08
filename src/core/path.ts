@@ -7,10 +7,15 @@ export type Path = readonly string[]
 export const parsePath = (text: string): Path =>
   text
     .trim()
-    // Bases writes property ids as `note.<name>` when its own menus edit a view.
-    .replace(/^note\./, '')
     .split('.')
     .filter((step) => step !== '')
+
+/**
+ * The field a Bases property id names. Bases keeps a view's `order`, `sort`
+ * and `groupBy` as property ids, `note.<field>`, so `note.name` is the field
+ * `name` and `note.note.status` the field `note.status`.
+ */
+export const parsePropertyId = (id: string): Path => parsePath(id.trim().replace(/^note\./, ''))
 
 export const formatPath = (path: Path): string => path.join('.')
 

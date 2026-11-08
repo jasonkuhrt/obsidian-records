@@ -54,7 +54,7 @@ export class CardsView extends ListView {
     return Math.max(1, Math.floor((width + gap) / (minCardWidth + gap)))
   }
 
-  protected override render(): void {
+  protected override draw(): void {
     if (this.noteConfig()) this.virtual.scrollToTop()
     const settings = this.settings()
     const titlePath = formatPath(settings.title)

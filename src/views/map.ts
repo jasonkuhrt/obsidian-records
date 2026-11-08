@@ -2,8 +2,9 @@ import * as L from 'leaflet'
 import type { QueryController } from 'obsidian'
 import Supercluster from 'supercluster'
 import { parseMapConfig, type MapConfig, type MapLayerConfig } from '../core/config.ts'
-import { categoryOf, geometryOf, pointOf } from '../core/geo.ts'
-import { getAt } from '../core/path.ts'
+import { categoryOf, geometryOf, pointOf, type Geometry } from '../core/geo.ts'
+import { createLoader } from '../core/loader.ts'
+import { getAt, type Path } from '../core/path.ts'
 import { matchesSearch, matchesWhere, searchTerms } from '../core/query.ts'
 import type { DataRecord } from '../core/source.ts'
 import { parseGpx, trackPath, type Track } from '../core/track.ts'
@@ -54,6 +55,29 @@ interface Pin {
   readonly track: string | null
 }
 
+/** A record whose boundary the map outlines, in the color of its pin. */
+interface Outlined {
+  readonly record: DataRecord
+  readonly layer: MapLayerConfig
+  readonly color: string
+  readonly geometry: Geometry
+}
+
+/**
+ * An outline on the map. `of` is replaced on every render, so a click shows
+ * the record as the view now reads it, titled by the view's current config.
+ */
+interface DrawnOutline {
+  readonly layer: L.Layer
+  of: Outlined
+}
+
+/** A pin's track on the map. `pin` is replaced on every draw, as an outline's `of` is. */
+interface DrawnTrack {
+  readonly line: L.Polyline
+  pin: Pin
+}
+
 interface Category {
   readonly key: string
   readonly color: string
@@ -81,7 +105,8 @@ const hiddenKey = (layer: number, category?: string): string =>
  * record's boundary outlined when it has one. A legend toggles layers and
  * their `colorBy` categories; a click on a pin or outline shows the record.
  * A record's GPX track is read only when it is needed: when its pin is
- * clicked, or when the map is zoomed in to `trackZoom` with its pin in view.
+ * clicked, or, once the user has moved or zoomed the map, when it is zoomed
+ * in to `trackZoom` with the pin in view. Opening the map reads no track.
  */
 export class MapView extends RecordsView {
   override type = mapViewType
@@ -93,10 +118,17 @@ export class MapView extends RecordsView {
   private tilesUrl = ''
   private readonly markers = L.layerGroup()
   private readonly outlines = L.layerGroup()
-  private readonly outlineCache = new Map<string, L.Layer>()
+  private readonly drawnOutlines = new Map<string, DrawnOutline>()
   private readonly tracks = L.layerGroup()
-  private readonly drawnTracks = new Map<string, L.Polyline>()
-  private readonly trackCache = new Map<string, Track | null>()
+  private readonly drawnTracks = new Map<string, DrawnTrack>()
+  /** A track by its vault path, read and parsed once; `null` when its file can't be read. */
+  private readonly loadTrack = createLoader(async (path): Promise<Track | null> => {
+    const started = performance.now()
+    const text = await this.readText(path)
+    const track = text === null ? null : parseGpx(text)
+    this.root.dataset['trackMs'] = String(Math.round(performance.now() - started))
+    return track
+  }, trackCacheSize)
   private readonly renderer = L.canvas({ padding: 0.3 })
   private index: Supercluster<{ pin: number }> | null = null
   private pins: Pin[] = []
@@ -108,6 +140,10 @@ export class MapView extends RecordsView {
   /** True until the selected track is drawn: the map then moves to show it. */
   private revealSelected = false
   private trackToken = 0
+  /** True while the view moves the map itself: opening it, fitting its size, revealing a track. */
+  private quiet = false
+  /** True once the user has moved or zoomed the map; only then are the tracks in view drawn. */
+  private moved = false
 
   constructor(controller: QueryController, containerEl: HTMLElement, host: RecordsHost) {
     super(controller, containerEl, host)
@@ -116,7 +152,7 @@ export class MapView extends RecordsView {
     this.mapEl = this.body.createDiv({ cls: 'records-map-canvas' })
     this.legendEl = this.body.createDiv({ cls: 'records-legend' })
     this.resize = new ResizeObserver(() => {
-      this.map?.invalidateSize()
+      this.fitSize()
       this.fitOnce()
     })
     this.resize.observe(this.mapEl)
@@ -134,6 +170,12 @@ export class MapView extends RecordsView {
     return JSON.stringify(this.settings())
   }
 
+  protected override labelled(): readonly Path[] {
+    return this.settings().layers.flatMap((layer) =>
+      layer.colorBy === null ? [] : [layer.colorBy],
+    )
+  }
+
   override onunload(): void {
     this.trackToken++
     this.resize.disconnect()
@@ -145,16 +187,21 @@ export class MapView extends RecordsView {
   private ensureMap(settings: MapConfig): L.Map {
     const map =
       this.map ??
-      L.map(this.mapEl, { zoomControl: true, worldCopyJump: true, preferCanvas: true }).setView(
-        settings.center === null ? [51, -116] : [...settings.center],
-        settings.zoom ?? 6,
-      )
+      L.map(this.mapEl, {
+        zoomControl: true,
+        worldCopyJump: true,
+        preferCanvas: true,
+        // The view's ResizeObserver fits the map to its element; Leaflet's own
+        // window listener would end a move the user never made.
+        trackResize: false,
+      }).setView(settings.center === null ? [51, -116] : [...settings.center], settings.zoom ?? 6)
     if (this.map === null) {
       this.map = map
       this.outlines.addTo(map)
       this.tracks.addTo(map)
       this.markers.addTo(map)
       map.on('moveend', () => {
+        if (!this.quiet) this.moved = true
         this.drawPins()
         void this.drawTracks()
       })
@@ -171,13 +218,13 @@ export class MapView extends RecordsView {
     return map
   }
 
-  protected override render(): void {
+  protected override draw(): void {
     const settings = this.settings()
-    const map = this.ensureMap(settings)
+    this.ensureMap(settings)
     const terms = searchTerms(this.search)
     const summaries: LayerSummary[] = []
     const pins: Pin[] = []
-    const outlines = new Map<string, { record: DataRecord; layer: MapLayerConfig; color: string }>()
+    const outlines = new Map<string, Outlined>()
     let total = 0
     let shown = 0
 
@@ -239,8 +286,9 @@ export class MapView extends RecordsView {
             lon: point[1],
             track,
           })
-        if (layer.boundary !== null && geometryOf(record.data, layer.boundary) !== null)
-          outlines.set(`${index}|${record.id}|${color}`, { record, layer, color })
+        const geometry = layer.boundary === null ? null : geometryOf(record.data, layer.boundary)
+        if (geometry !== null)
+          outlines.set(`${index}|${record.id}|${color}`, { record, layer, color, geometry })
       }
     })
 
@@ -260,10 +308,30 @@ export class MapView extends RecordsView {
     )
     this.drawOutlines(outlines)
     this.renderLegend(summaries)
-    map.invalidateSize()
+    this.fitSize()
     this.fitOnce(settings)
     this.drawPins()
     void this.drawTracks()
+  }
+
+  /**
+   * Runs a move the view makes itself, unanimated so that it ends before this
+   * returns, so the map doesn't take it for the user's.
+   */
+  private moveQuietly(move: (map: L.Map) => void): void {
+    const map = this.map
+    if (map === null) return
+    this.quiet = true
+    try {
+      move(map)
+    } finally {
+      this.quiet = false
+    }
+  }
+
+  /** Fits the map to its element's size, which Leaflet doesn't watch. */
+  private fitSize(): void {
+    this.moveQuietly((map) => map.invalidateSize({ animate: false }))
   }
 
   /**
@@ -271,16 +339,17 @@ export class MapView extends RecordsView {
    * time the map has both pins and a size.
    */
   private fitOnce(settings = this.settings()): void {
-    const map = this.map
-    if (this.fitted || map === null || this.pins.length === 0 || this.mapEl.clientHeight === 0)
+    if (this.fitted || this.map === null || this.pins.length === 0 || this.mapEl.clientHeight === 0)
       return
     this.fitted = true
-    if (settings.center !== null) {
-      map.setView([...settings.center], settings.zoom ?? 8)
-      return
-    }
-    map.fitBounds(L.latLngBounds(this.pins.map((pin) => L.latLng(pin.lat, pin.lon))), {
-      padding: [24, 24],
+    const center = settings.center
+    this.moveQuietly((map) => {
+      if (center !== null) map.setView([...center], settings.zoom ?? 8, { animate: false })
+      else
+        map.fitBounds(L.latLngBounds(this.pins.map((pin) => L.latLng(pin.lat, pin.lon))), {
+          padding: [24, 24],
+          animate: false,
+        })
     })
   }
 
@@ -339,26 +408,39 @@ export class MapView extends RecordsView {
     }
   }
 
-  private drawOutlines(
-    wanted: Map<string, { record: DataRecord; layer: MapLayerConfig; color: string }>,
-  ): void {
-    for (const [key, layer] of this.outlineCache)
-      if (!wanted.has(key)) {
-        this.outlines.removeLayer(layer)
-        this.outlineCache.delete(key)
+  /**
+   * Outlines the wanted boundaries, keeping those already drawn from the same
+   * geometry. A reload reads every record anew, and a changed `boundary`
+   * names another field, so either draws the outline again.
+   */
+  private drawOutlines(wanted: ReadonlyMap<string, Outlined>): void {
+    for (const [key, drawn] of this.drawnOutlines)
+      if (wanted.get(key)?.geometry !== drawn.of.geometry) {
+        this.outlines.removeLayer(drawn.layer)
+        this.drawnOutlines.delete(key)
       }
-    for (const [key, { record, layer, color }] of wanted) {
-      if (this.outlineCache.has(key) || layer.boundary === null) continue
-      const geometry = geometryOf(record.data, layer.boundary)
-      if (geometry === null) continue
-      const outline = L.geoJSON(geometry, {
-        style: { color, weight: 1.5, opacity: 0.9, fillOpacity: 0.12, renderer: this.renderer },
+    for (const [key, of] of wanted) {
+      const drawn = this.drawnOutlines.get(key)
+      if (drawn !== undefined) {
+        drawn.of = of
+        continue
+      }
+      const layer = L.geoJSON(of.geometry, {
+        style: {
+          color: of.color,
+          weight: 1.5,
+          opacity: 0.9,
+          fillOpacity: 0.12,
+          renderer: this.renderer,
+        },
       })
-      outline.on('click', () => {
-        this.showDetail(record, titleOf(record, layer.title), layer.body)
+      const entry: DrawnOutline = { layer, of }
+      layer.on('click', () => {
+        const { record, layer: config } = entry.of
+        this.showDetail(record, titleOf(record, config.title), config.body)
       })
-      this.outlineCache.set(key, outline)
-      this.outlines.addLayer(outline)
+      this.drawnOutlines.set(key, entry)
+      this.outlines.addLayer(layer)
     }
   }
 
@@ -420,7 +502,7 @@ export class MapView extends RecordsView {
     const wanted = new Map<string, Pin>()
     const selected = this.pins.find((pin) => pin.key === this.selected)
     if (selected?.track !== undefined && selected.track !== null) wanted.set(selected.key, selected)
-    if (map.getZoom() >= this.trackZoom) {
+    if (this.moved && map.getZoom() >= this.trackZoom) {
       const bounds = map.getBounds()
       const center = map.getCenter()
       const distance = (pin: Pin): number =>
@@ -431,17 +513,20 @@ export class MapView extends RecordsView {
         .slice(0, maxZoomTracks)
       for (const pin of inView) wanted.set(pin.key, pin)
     }
-    for (const [key, line] of this.drawnTracks)
-      if (!wanted.has(key)) {
-        this.tracks.removeLayer(line)
+    // A line stays only while its pin is wanted and names the same track: a
+    // reload can give a record another track path.
+    for (const [key, drawn] of this.drawnTracks)
+      if (wanted.get(key)?.track !== drawn.pin.track) {
+        this.tracks.removeLayer(drawn.line)
         this.drawnTracks.delete(key)
       }
     for (const [key, pin] of wanted) {
       const style = this.trackStyle(pin)
       const drawn = this.drawnTracks.get(key)
       if (drawn !== undefined) {
-        drawn.setStyle(style)
-        if (key === this.selected) this.reveal(drawn)
+        drawn.pin = pin
+        drawn.line.setStyle(style)
+        if (key === this.selected) this.reveal(drawn.line)
         continue
       }
       if (pin.track === null) continue
@@ -453,10 +538,11 @@ export class MapView extends RecordsView {
         track.map((points) => points.map(([lat, lon]) => L.latLng(lat, lon))),
         { ...style, renderer: this.renderer, interactive: true },
       )
+      const entry: DrawnTrack = { line, pin }
       line.on('click', () => {
-        this.select(pin)
+        this.select(entry.pin)
       })
-      this.drawnTracks.set(key, line)
+      this.drawnTracks.set(key, entry)
       this.tracks.addLayer(line)
       if (key === this.selected) this.reveal(line)
     }
@@ -477,35 +563,19 @@ export class MapView extends RecordsView {
     const bounds = line.getBounds()
     if (map.getBounds().contains(bounds)) return
     const width = map.getContainer().clientWidth
-    map.fitBounds(bounds, {
-      paddingTopLeft: [24, 24],
-      paddingBottomRight: [Math.min(664, Math.round(width / 2)), 24],
-      maxZoom: 15,
-    })
+    this.moveQuietly((quietMap) =>
+      quietMap.fitBounds(bounds, {
+        paddingTopLeft: [24, 24],
+        paddingBottomRight: [Math.min(664, Math.round(width / 2)), 24],
+        maxZoom: 15,
+        animate: false,
+      }),
+    )
   }
 
   private trackStyle(pin: Pin): L.PathOptions {
     const selected = pin.key === this.selected
     return { color: pin.color, weight: selected ? 5 : 3, opacity: selected ? 1 : 0.75 }
-  }
-
-  /** A track from the cache, else read and parsed now; `null` when its file can't be read. */
-  private async loadTrack(path: string): Promise<Track | null> {
-    if (this.trackCache.has(path)) {
-      const cached = this.trackCache.get(path) ?? null
-      this.trackCache.delete(path)
-      this.trackCache.set(path, cached)
-      return cached
-    }
-    const started = performance.now()
-    const text = await this.readText(path)
-    const track = text === null ? null : parseGpx(text)
-    this.trackCache.set(path, track)
-    const oldest = this.trackCache.keys().next()
-    if (this.trackCache.size > trackCacheSize && oldest.done !== true)
-      this.trackCache.delete(oldest.value)
-    this.root.dataset['trackMs'] = String(Math.round(performance.now() - started))
-    return track
   }
 
   private renderLegend(summaries: readonly LayerSummary[]): void {

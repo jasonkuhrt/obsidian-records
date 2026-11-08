@@ -7,8 +7,10 @@ import {
   parseYaml,
   setIcon,
   type App,
+  type Debouncer,
   type QueryController,
 } from 'obsidian'
+import { viewSetting } from '../core/config.ts'
 import { formatText } from '../core/format.ts'
 import { formatPath, getAt, type Path } from '../core/path.ts'
 import {
@@ -72,7 +74,10 @@ export abstract class RecordsView extends BasesView {
   private readonly problemsEl: HTMLElement
   private readonly detailEl: HTMLElement
   private started = false
-  private configSnapshot = ''
+  /** True once the view has unloaded: nothing draws after that. */
+  private disposed = false
+  private readonly onSearch: Debouncer<[], void>
+  private drawSnapshot = ''
   private sourcesSnapshot = ''
   private loadToken = 0
   /** Owns what the detail's Markdown rendered, so closing the detail releases it. */
@@ -87,11 +92,13 @@ export abstract class RecordsView extends BasesView {
       cls: 'records-search',
       attr: { type: 'search', placeholder: 'Search records', spellcheck: 'false' },
     })
-    const onSearch = debounce(() => {
+    this.onSearch = debounce(() => {
       this.search = searchEl.value
-      this.renderTimed()
+      this.render()
     }, 120)
-    searchEl.addEventListener('input', onSearch)
+    searchEl.addEventListener('input', () => {
+      this.onSearch()
+    })
     this.countEl = toolbar.createSpan({ cls: 'records-count' })
     const refresh = toolbar.createEl('button', {
       cls: 'clickable-icon records-refresh',
@@ -107,21 +114,9 @@ export abstract class RecordsView extends BasesView {
     })
   }
 
-  /**
-   * One key of this view's entry in the `.base` file. Bases keeps `order`,
-   * `sort` and `groupBy` apart from a view's other keys, as property ids such
-   * as `note.name`, so those come through their own getters.
-   */
+  /** One key of this view's entry in the `.base` file. */
   protected setting(key: string): unknown {
-    if (key === 'name') return this.config.name
-    if (key === 'order') return this.config.getOrder()
-    if (key === 'sort') return this.config.getSort()
-    if (key === 'groupBy') {
-      // Bases has no public getter for groupBy; the view's config object holds it.
-      const groupBy: unknown = Reflect.get(this.config, 'groupBy')
-      return groupBy
-    }
-    return this.config.get(key)
+    return viewSetting(this.config, key)
   }
 
   /**
@@ -142,17 +137,22 @@ export abstract class RecordsView extends BasesView {
   /** The vault paths this view reads. */
   protected abstract sourcePaths(): string[]
 
-  /** Draws the records. Runs after a load, a search and a config change. */
-  protected abstract render(): void
+  /** Draws the records. Runs through `render`, after a load, a search and a config change. */
+  protected abstract draw(): void
 
   /** A text that changes whenever the view's config does. */
   protected abstract configKey(): string
+
+  /** The fields whose headings the view shows, so a heading renamed in the Base redraws it. */
+  protected abstract labelled(): readonly Path[]
 
   override onload(): void {
     this.start()
   }
 
   override onunload(): void {
+    this.disposed = true
+    this.onSearch.cancel()
     this.host.views.delete(this)
     this.loadToken++
     this.root.remove()
@@ -163,11 +163,16 @@ export abstract class RecordsView extends BasesView {
       this.start()
       return
     }
-    const configKey = this.configKey()
-    if (configKey === this.configSnapshot) return
-    this.configSnapshot = configKey
-    if (this.sourcesKey() === this.sourcesSnapshot) this.renderTimed()
+    const drawKey = this.drawKey()
+    if (drawKey === this.drawSnapshot) return
+    this.drawSnapshot = drawKey
+    if (this.sourcesKey() === this.sourcesSnapshot) this.render()
     else void this.reload()
+  }
+
+  /** A text that changes whenever what the view draws from its config does: its keys and headings. */
+  private drawKey(): string {
+    return JSON.stringify([this.configKey(), this.labelled().map((path) => this.label(path))])
   }
 
   private start(): void {
@@ -189,14 +194,14 @@ export abstract class RecordsView extends BasesView {
     const loaded = await Promise.all(
       paths.map((path) => loadSource(sourceFs(this.host.app), parseYaml, path)),
     )
-    if (token !== this.loadToken) return
+    if (token !== this.loadToken || this.disposed) return
     this.sources = new Map(loaded.map((source) => [source.source, source]))
     this.ready = true
     this.sourcesSnapshot = JSON.stringify(paths)
-    this.configSnapshot = this.configKey()
+    this.drawSnapshot = this.drawKey()
     this.root.dataset['loadMs'] = String(Math.round(performance.now() - started))
     this.renderProblems(loaded)
-    this.renderTimed()
+    this.render()
   }
 
   /** A vault file's text, dot folders included; `null` when it can't be read. */
@@ -223,9 +228,11 @@ export abstract class RecordsView extends BasesView {
     )
   }
 
-  private renderTimed(): void {
+  /** Draws the records, timed, unless the view has unloaded. */
+  protected render(): void {
+    if (this.disposed) return
     const started = performance.now()
-    this.render()
+    this.draw()
     this.root.dataset['renderMs'] = String(Math.round(performance.now() - started))
   }
 

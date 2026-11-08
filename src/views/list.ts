@@ -27,6 +27,10 @@ export abstract class ListView extends RecordsView {
     return JSON.stringify(this.settings())
   }
 
+  protected override labelled(): readonly Path[] {
+    return this.fields(this.settings())
+  }
+
   protected effectiveSort(settings: ListConfig): readonly SortKey[] {
     return this.sortOverride ?? settings.sort
   }

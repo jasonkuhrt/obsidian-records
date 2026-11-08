@@ -58,12 +58,12 @@ export const valueParts = (value: unknown): Part[] => {
 }
 
 /**
- * The fields a view shows when its `order` is empty: the records' top-level
+ * The fields a view shows when its `order` is empty: every record's top-level
  * fields in first-seen order, leaving out geometry and `_`-prefixed tags.
  */
-export const fieldsOf = (records: readonly DataRecord[], sample = 200): Path[] => {
+export const fieldsOf = (records: readonly DataRecord[]): Path[] => {
   const seen = new Set<string>()
-  for (const record of records.slice(0, sample))
+  for (const record of records)
     for (const [key, value] of Object.entries(record.data))
       if (!key.startsWith('_') && !isGeometry(value)) seen.add(key)
   return [...seen].map((key) => [key])
