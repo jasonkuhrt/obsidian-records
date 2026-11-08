@@ -1,0 +1,21 @@
+# macOS
+.DS_Store
+
+# Dependencies
+node_modules/
+
+# Build output
+/build/
+
+# Local agent config (private permission gates)
+CLAUDE.local.md
+
+# git-hooks local state
+.local/
+
+# Session local state
+.sessions/
+
+# Editor
+.vscode/
+.idea/
