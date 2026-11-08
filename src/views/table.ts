@@ -122,7 +122,7 @@ export class TableView extends ListView {
       renderValue(row.createDiv({ cls: 'records-td' }), getAt(record.data, path))
     row.addEventListener('click', (event) => {
       if (event.target instanceof HTMLElement && event.target.closest('a') !== null) return
-      this.showDetail(record, titleOf(record, settings.title))
+      this.showDetail(record, titleOf(record, settings.title), settings.body)
     })
     return row
   }

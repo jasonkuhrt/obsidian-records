@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { parse as parseYaml } from 'yaml'
-import { parseListConfig, parseMapConfig } from '../src/core/config.ts'
+import { defaultTrackZoom, parseListConfig, parseMapConfig } from '../src/core/config.ts'
 import { geometryOf, pointOf } from '../src/core/geo.ts'
 
 /** A view's entry in a `.base` file, read the way `BasesViewConfig.get` reads it. */
@@ -29,10 +29,11 @@ where: { backcountry: true, reservation: [reservation, both] }
       sort: [{ path: ['name'], direction: 'DESC' }],
       groupBy: { path: ['jurisdiction'], direction: 'ASC' },
       where: [
-        { path: ['backcountry'], values: [true] },
-        { path: ['reservation'], values: ['reservation', 'both'] },
+        { path: ['backcountry'], test: { kind: 'is', values: [true] } },
+        { path: ['reservation'], test: { kind: 'is', values: ['reservation', 'both'] } },
       ],
       title: ['name'],
+      body: null,
     })
   })
 
@@ -57,6 +58,10 @@ title: label
 
   test('a view without a source says so with null', () => {
     expect(parseListConfig(view('name: Empty')).source).toBeNull()
+  })
+
+  test('a body names the field a detail renders as Markdown', () => {
+    expect(parseListConfig(view('source: trips\nbody: summary')).body).toEqual(['summary'])
   })
 })
 
@@ -83,6 +88,9 @@ colors: { true: purple, false: green }
         colorBy: ['backcountry'],
         colors: { true: 'purple', false: 'green' },
         color: null,
+        body: null,
+        track: null,
+        trackRoot: null,
       },
     ])
   })
@@ -109,9 +117,29 @@ layers:
       ['places.yaml', null, null],
     ])
     expect(settings.layers[0]?.where).toEqual([
-      { path: ['wildernessCamping', 'status'], values: ['permitted'] },
+      { path: ['wildernessCamping', 'status'], test: { kind: 'is', values: ['permitted'] } },
     ])
     expect(settings.layers[1]?.coordinates).toEqual({ kind: 'single', path: ['latlon'] })
+  })
+
+  test('a layer names its track field, the folder tracks start from, and the zoom they show at', () => {
+    const settings = parseMapConfig(
+      view(`
+source: .odyssey/trip/records
+coordinates: [lat, lon]
+body: summary
+track: assets.gpx
+trackRoot: .odyssey/trip
+trackZoom: 11
+`),
+    )
+    expect(settings.trackZoom).toBe(11)
+    expect(settings.layers[0]).toMatchObject({
+      body: ['summary'],
+      track: ['assets', 'gpx'],
+      trackRoot: '.odyssey/trip',
+    })
+    expect(parseMapConfig(view('source: data')).trackZoom).toBe(defaultTrackZoom)
   })
 
   test('open at a center and zoom when given, and ignore malformed ones', () => {

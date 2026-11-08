@@ -209,6 +209,11 @@
   display: block;
 }
 
+/* A record with Markdown text to read gets a panel wide enough to read it in. */
+.records-detail.has-markdown {
+  width: min(640px, 100%);
+}
+
 .records-detail-header {
   display: flex;
   align-items: flex-start;
@@ -257,7 +262,47 @@
   color: var(--text-faint);
 }
 
+.records-fields-item + .records-fields-item {
+  margin-top: 2px;
+}
+
+.records-detail-markdown {
+  margin-top: var(--size-4-4);
+  padding-top: var(--size-4-3);
+  border-top: 1px solid var(--background-modifier-border);
+  font-size: var(--font-text-size);
+  user-select: text;
+}
+
+.records-detail-markdown img {
+  max-width: 100%;
+}
+
 /* Map */
+
+.records-cluster-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.records-cluster-item {
+  display: flex;
+  align-items: center;
+  gap: var(--size-4-2);
+  padding: var(--size-4-1) var(--size-4-1);
+  border-radius: var(--radius-s);
+  cursor: pointer;
+}
+
+.records-cluster-item:hover {
+  background: var(--background-modifier-hover);
+}
+
+.records-cluster-category {
+  margin-left: auto;
+  color: var(--text-faint);
+  font-size: var(--font-ui-smaller);
+}
 
 .records-map-canvas {
   position: absolute;

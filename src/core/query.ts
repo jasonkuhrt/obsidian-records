@@ -5,15 +5,35 @@ export type Scalar = string | number | boolean | null
 
 export type Direction = 'ASC' | 'DESC'
 
+const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' })
+
 export interface SortKey {
   readonly path: Path
   readonly direction: Direction
 }
 
-/** Each condition keeps a record whose value at `path` is one of `values`. */
+/**
+ * One test a value must pass. A plain value or list in `where` is `is`; an
+ * object such as `{ min: 4.5 }` or `{ contains: Ski }` names the others.
+ */
+export type Test =
+  /** The value is one of `values`; `null` stands for a missing value. */
+  | { readonly kind: 'is'; readonly values: readonly Scalar[] }
+  /** The value is none of `values`. */
+  | { readonly kind: 'not'; readonly values: readonly Scalar[] }
+  /** The text contains one of `texts`, ignoring case. */
+  | { readonly kind: 'contains'; readonly texts: readonly string[] }
+  /** The value is at least `value`: numbers by number, text by text. */
+  | { readonly kind: 'min'; readonly value: number | string }
+  /** The value is at most `value`. */
+  | { readonly kind: 'max'; readonly value: number | string }
+  /** The value is there (`true`) or missing (`false`); empty text and lists count as missing. */
+  | { readonly kind: 'present'; readonly value: boolean }
+
+/** Keeps a record whose value at `path` passes `test`. */
 export interface WhereCondition {
   readonly path: Path
-  readonly values: readonly Scalar[]
+  readonly test: Test
 }
 
 export type Where = readonly WhereCondition[]
@@ -21,18 +41,47 @@ export type Where = readonly WhereCondition[]
 const isMissing = (value: unknown): value is null | undefined =>
   value === null || value === undefined
 
-/**
- * A list value matches when any of its items does, so `where: { sources: osm }`
- * keeps the records whose `sources` include `osm`.
- */
-const matchesCondition = (value: unknown, condition: WhereCondition): boolean => {
-  if (Array.isArray(value)) return value.some((item) => matchesCondition(item, condition))
-  if (isMissing(value)) return condition.values.includes(null)
-  return condition.values.some((expected) => expected === value)
+const isEmpty = (value: unknown): boolean =>
+  isMissing(value) || value === '' || (Array.isArray(value) && value.length === 0)
+
+const isOneOf = (value: unknown, values: readonly Scalar[]): boolean => {
+  if (Array.isArray(value)) return value.some((item) => isOneOf(item, values))
+  if (isMissing(value)) return values.includes(null)
+  return values.some((expected) => expected === value)
+}
+
+const contains = (value: unknown, texts: readonly string[]): boolean => {
+  if (Array.isArray(value)) return value.some((item) => contains(item, texts))
+  if (typeof value !== 'string') return false
+  const lower = value.toLowerCase()
+  return texts.some((text) => lower.includes(text.toLowerCase()))
+}
+
+/** Numbers compare with numbers and text with text; anything else never passes. */
+const bound = (
+  value: unknown,
+  limit: number | string,
+  keep: (order: number) => boolean,
+): boolean => {
+  if (Array.isArray(value)) return value.some((item) => bound(item, limit, keep))
+  if (typeof value === 'number' && typeof limit === 'number') return keep(value - limit)
+  if (typeof value === 'string' && typeof limit === 'string')
+    return keep(collator.compare(value, limit))
+  return false
+}
+
+/** A list value passes `is`, `contains`, `min` and `max` when one of its items does. */
+const passes = (value: unknown, test: Test): boolean => {
+  if (test.kind === 'is') return isOneOf(value, test.values)
+  if (test.kind === 'not') return !isOneOf(value, test.values)
+  if (test.kind === 'contains') return contains(value, test.texts)
+  if (test.kind === 'min') return bound(value, test.value, (order) => order >= 0)
+  if (test.kind === 'max') return bound(value, test.value, (order) => order <= 0)
+  return isEmpty(value) !== test.value
 }
 
 export const matchesWhere = (record: DataRecord, where: Where): boolean =>
-  where.every((condition) => matchesCondition(getAt(record.data, condition.path), condition))
+  where.every((condition) => passes(getAt(record.data, condition.path), condition.test))
 
 export const searchTerms = (query: string): string[] =>
   query
@@ -43,8 +92,6 @@ export const searchTerms = (query: string): string[] =>
 /** Every term must appear in some field. */
 export const matchesSearch = (record: DataRecord, terms: readonly string[]): boolean =>
   terms.every((term) => record.text.includes(term))
-
-const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' })
 
 const typeRank = (value: unknown): number => {
   if (typeof value === 'boolean') return 0

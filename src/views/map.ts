@@ -3,8 +3,10 @@ import type { QueryController } from 'obsidian'
 import Supercluster from 'supercluster'
 import { parseMapConfig, type MapConfig, type MapLayerConfig } from '../core/config.ts'
 import { categoryOf, geometryOf, pointOf } from '../core/geo.ts'
+import { getAt } from '../core/path.ts'
 import { matchesSearch, matchesWhere, searchTerms } from '../core/query.ts'
 import type { DataRecord } from '../core/source.ts'
+import { parseGpx, trackPath, type Track } from '../core/track.ts'
 import { titleOf, type RecordsHost } from './base.ts'
 import { RecordsView } from './base.ts'
 
@@ -13,6 +15,18 @@ export const mapViewType = 'records-map'
 const defaultTiles =
   'https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}'
 const defaultAttribution = 'Tiles © Esri'
+
+/**
+ * The deepest zoom pins cluster at. Pins at one position stay a cluster at
+ * every zoom, and clicking it lists them, since no zoom can split them.
+ */
+const clusterMaxZoom = 19
+
+/** The most tracks drawn for the records in view when zoomed in; the nearest to the center win. */
+const maxZoomTracks = 40
+
+/** How many parsed tracks a map keeps, so panning back draws them without reading again. */
+const trackCacheSize = 300
 
 /** Obsidian's theme colors, used in order when a layer or category names none. */
 const palette = ['blue', 'green', 'purple', 'orange', 'red', 'cyan', 'pink', 'yellow']
@@ -29,11 +43,15 @@ const themeColor = (index: number): string => {
 }
 
 interface Pin {
+  /** The layer's index and the record's id: one pin's identity across renders. */
+  readonly key: string
   readonly record: DataRecord
   readonly layer: MapLayerConfig
   readonly color: string
   readonly lat: number
   readonly lon: number
+  /** The vault path of the record's GPX track, when its layer names a `track` field. */
+  readonly track: string | null
 }
 
 interface Category {
@@ -62,6 +80,8 @@ const hiddenKey = (layer: number, category?: string): string =>
  * Pins from each record's coordinates, clustered when zoomed out, with a
  * record's boundary outlined when it has one. A legend toggles layers and
  * their `colorBy` categories; a click on a pin or outline shows the record.
+ * A record's GPX track is read only when it is needed: when its pin is
+ * clicked, or when the map is zoomed in to `trackZoom` with its pin in view.
  */
 export class MapView extends RecordsView {
   override type = mapViewType
@@ -74,11 +94,20 @@ export class MapView extends RecordsView {
   private readonly markers = L.layerGroup()
   private readonly outlines = L.layerGroup()
   private readonly outlineCache = new Map<string, L.Layer>()
+  private readonly tracks = L.layerGroup()
+  private readonly drawnTracks = new Map<string, L.Polyline>()
+  private readonly trackCache = new Map<string, Track | null>()
   private readonly renderer = L.canvas({ padding: 0.3 })
   private index: Supercluster<{ pin: number }> | null = null
   private pins: Pin[] = []
   private readonly hidden = new Set<string>()
   private fitted = false
+  private trackZoom = 12
+  /** The pin whose record the detail shows; its track is drawn at any zoom. */
+  private selected: string | null = null
+  /** True until the selected track is drawn: the map then moves to show it. */
+  private revealSelected = false
+  private trackToken = 0
 
   constructor(controller: QueryController, containerEl: HTMLElement, host: RecordsHost) {
     super(controller, containerEl, host)
@@ -106,6 +135,7 @@ export class MapView extends RecordsView {
   }
 
   override onunload(): void {
+    this.trackToken++
     this.resize.disconnect()
     this.map?.remove()
     this.map = null
@@ -121,10 +151,12 @@ export class MapView extends RecordsView {
       )
     if (this.map === null) {
       this.map = map
-      this.markers.addTo(map)
       this.outlines.addTo(map)
+      this.tracks.addTo(map)
+      this.markers.addTo(map)
       map.on('moveend', () => {
         this.drawPins()
+        void this.drawTracks()
       })
     }
     const url = settings.tiles ?? defaultTiles
@@ -149,6 +181,7 @@ export class MapView extends RecordsView {
     let total = 0
     let shown = 0
 
+    this.trackZoom = settings.trackZoom
     settings.layers.forEach((layer, index) => {
       const layerColor = layer.color ?? themeColor(index)
       const summary: LayerSummary = {
@@ -191,8 +224,21 @@ export class MapView extends RecordsView {
         shown++
         const color = category?.color ?? layerColor
         const point = layer.coordinates === null ? null : pointOf(record.data, layer.coordinates)
+        const track =
+          layer.track === null
+            ? null
+            : trackPath(getAt(record.data, layer.track), layer.trackRoot, record.file)
         if (point === null) summary.unplaced++
-        else pins.push({ record, layer, color, lat: point[0], lon: point[1] })
+        else
+          pins.push({
+            key: `${index}|${record.id}`,
+            record,
+            layer,
+            color,
+            lat: point[0],
+            lon: point[1],
+            track,
+          })
         if (layer.boundary !== null && geometryOf(record.data, layer.boundary) !== null)
           outlines.set(`${index}|${record.id}|${color}`, { record, layer, color })
       }
@@ -204,7 +250,7 @@ export class MapView extends RecordsView {
       // Leaflet's tiles are 256 px, so this makes `radius` screen pixels.
       extent: 256,
       radius: 56,
-      maxZoom: 16,
+      maxZoom: clusterMaxZoom,
     }).load(
       pins.map((pin, position) => ({
         type: 'Feature' as const,
@@ -217,6 +263,7 @@ export class MapView extends RecordsView {
     map.invalidateSize()
     this.fitOnce(settings)
     this.drawPins()
+    void this.drawTracks()
   }
 
   /**
@@ -265,9 +312,11 @@ export class MapView extends RecordsView {
             iconSize: [size, size],
           }),
         })
-          .on('click', () =>
-            map.setView([lat, lon], Math.min(19, index.getClusterExpansionZoom(clusterId))),
-          )
+          .on('click', () => {
+            const zoom = index.getClusterExpansionZoom(clusterId)
+            if (zoom <= clusterMaxZoom) map.setView([lat, lon], zoom)
+            else this.showCluster(index, clusterId)
+          })
           .addTo(this.markers)
         continue
       }
@@ -284,7 +333,7 @@ export class MapView extends RecordsView {
       })
       marker
         .on('click', () => {
-          this.showDetail(pin.record, title)
+          this.select(pin)
         })
         .addTo(this.markers)
     }
@@ -306,11 +355,157 @@ export class MapView extends RecordsView {
         style: { color, weight: 1.5, opacity: 0.9, fillOpacity: 0.12, renderer: this.renderer },
       })
       outline.on('click', () => {
-        this.showDetail(record, titleOf(record, layer.title))
+        this.showDetail(record, titleOf(record, layer.title), layer.body)
       })
       this.outlineCache.set(key, outline)
       this.outlines.addLayer(outline)
     }
+  }
+
+  /**
+   * Lists the records of a cluster whose pins share one position, such as
+   * trips placed at their area's center; clicking one shows it.
+   */
+  private showCluster(index: Supercluster<{ pin: number }>, clusterId: number): void {
+    const pins = index
+      .getLeaves(clusterId, Infinity)
+      .flatMap((leaf) => {
+        const pin = this.pins[leaf.properties.pin]
+        return pin === undefined ? [] : [pin]
+      })
+      .map((pin) => ({ pin, title: titleOf(pin.record, pin.layer.title) }))
+      .toSorted((a, b) => a.title.localeCompare(b.title))
+    const panel = this.openPanel(
+      `${pins.length.toLocaleString()} records here`,
+      'They share one position on the map.',
+    )
+    const list = panel.createDiv({ cls: 'records-cluster-list' })
+    for (const { pin, title } of pins) {
+      const row = list.createDiv({ cls: 'records-cluster-item' })
+      row.createSpan({ cls: 'records-swatch' }).style.backgroundColor = pin.color
+      row.createSpan({ text: title })
+      const category =
+        pin.layer.colorBy === null ? '' : categoryOf(pin.record.data, pin.layer.colorBy)
+      if (category !== '') row.createSpan({ cls: 'records-cluster-category', text: category })
+      row.addEventListener('click', () => {
+        this.select(pin)
+      })
+    }
+  }
+
+  /** Shows a pin's record and draws its track. */
+  private select(pin: Pin): void {
+    this.showDetail(pin.record, titleOf(pin.record, pin.layer.title), pin.layer.body)
+    this.selected = pin.key
+    this.revealSelected = true
+    void this.drawTracks()
+  }
+
+  protected override hideDetail(): void {
+    super.hideDetail()
+    if (this.selected === null) return
+    this.selected = null
+    void this.drawTracks()
+  }
+
+  /**
+   * Draws the tracks wanted now and removes the rest: the selected pin's, and
+   * when zoomed in to `trackZoom`, those of the pins in view. Each GPX file is
+   * read and parsed the first time it is wanted, never before.
+   */
+  private async drawTracks(): Promise<void> {
+    const map = this.map
+    if (map === null) return
+    const token = ++this.trackToken
+    const wanted = new Map<string, Pin>()
+    const selected = this.pins.find((pin) => pin.key === this.selected)
+    if (selected?.track !== undefined && selected.track !== null) wanted.set(selected.key, selected)
+    if (map.getZoom() >= this.trackZoom) {
+      const bounds = map.getBounds()
+      const center = map.getCenter()
+      const distance = (pin: Pin): number =>
+        (pin.lat - center.lat) ** 2 + (pin.lon - center.lng) ** 2
+      const inView = this.pins
+        .filter((pin) => pin.track !== null && bounds.contains([pin.lat, pin.lon]))
+        .toSorted((a, b) => distance(a) - distance(b))
+        .slice(0, maxZoomTracks)
+      for (const pin of inView) wanted.set(pin.key, pin)
+    }
+    for (const [key, line] of this.drawnTracks)
+      if (!wanted.has(key)) {
+        this.tracks.removeLayer(line)
+        this.drawnTracks.delete(key)
+      }
+    for (const [key, pin] of wanted) {
+      const style = this.trackStyle(pin)
+      const drawn = this.drawnTracks.get(key)
+      if (drawn !== undefined) {
+        drawn.setStyle(style)
+        if (key === this.selected) this.reveal(drawn)
+        continue
+      }
+      if (pin.track === null) continue
+      // oxlint-disable-next-line no-await-in-loop -- one file at a time keeps the map responsive and cancellable
+      const track = await this.loadTrack(pin.track)
+      if (token !== this.trackToken) return
+      if (track === null || track.length === 0) continue
+      const line = L.polyline(
+        track.map((points) => points.map(([lat, lon]) => L.latLng(lat, lon))),
+        { ...style, renderer: this.renderer, interactive: true },
+      )
+      line.on('click', () => {
+        this.select(pin)
+      })
+      this.drawnTracks.set(key, line)
+      this.tracks.addLayer(line)
+      if (key === this.selected) this.reveal(line)
+    }
+    this.root.dataset['tracks'] = String(this.drawnTracks.size)
+  }
+
+  /**
+   * Brings the selected track to the front and, the first time it is drawn,
+   * moves the map to it when it lies outside the view: a pin can sit at its
+   * area's center, kilometres from the route. The detail panel covers the
+   * map's right side, so the track is framed left of it.
+   */
+  private reveal(line: L.Polyline): void {
+    line.bringToFront()
+    const map = this.map
+    if (!this.revealSelected || map === null) return
+    this.revealSelected = false
+    const bounds = line.getBounds()
+    if (map.getBounds().contains(bounds)) return
+    const width = map.getContainer().clientWidth
+    map.fitBounds(bounds, {
+      paddingTopLeft: [24, 24],
+      paddingBottomRight: [Math.min(664, Math.round(width / 2)), 24],
+      maxZoom: 15,
+    })
+  }
+
+  private trackStyle(pin: Pin): L.PathOptions {
+    const selected = pin.key === this.selected
+    return { color: pin.color, weight: selected ? 5 : 3, opacity: selected ? 1 : 0.75 }
+  }
+
+  /** A track from the cache, else read and parsed now; `null` when its file can't be read. */
+  private async loadTrack(path: string): Promise<Track | null> {
+    if (this.trackCache.has(path)) {
+      const cached = this.trackCache.get(path) ?? null
+      this.trackCache.delete(path)
+      this.trackCache.set(path, cached)
+      return cached
+    }
+    const started = performance.now()
+    const text = await this.readText(path)
+    const track = text === null ? null : parseGpx(text)
+    this.trackCache.set(path, track)
+    const oldest = this.trackCache.keys().next()
+    if (this.trackCache.size > trackCacheSize && oldest.done !== true)
+      this.trackCache.delete(oldest.value)
+    this.root.dataset['trackMs'] = String(Math.round(performance.now() - started))
+    return track
   }
 
   private renderLegend(summaries: readonly LayerSummary[]): void {
@@ -349,6 +544,11 @@ export class MapView extends RecordsView {
         this.legendEl.createDiv({
           cls: 'records-legend-note',
           text: `${summary.unplaced.toLocaleString()} without coordinates`,
+        })
+      if (summary.layer.track !== null)
+        this.legendEl.createDiv({
+          cls: 'records-legend-note',
+          text: 'Tracks: click a pin, or zoom in',
         })
     }
   }

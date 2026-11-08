@@ -85,6 +85,64 @@ describe('where', () => {
   })
 })
 
+describe('where operators', () => {
+  const trips = [
+    record('1', {
+      name: 'Ski Tour',
+      activity: 'Alpine Ski',
+      stars: 5,
+      date: '2019-08-03',
+      gpx: 'a.gpx',
+    }),
+    record('2', {
+      name: 'Scramble',
+      activity: 'Scramble',
+      stars: 4,
+      date: '2020-07-12',
+      gpx: null,
+    }),
+    record('3', { name: 'Walk', activity: 'Hike', stars: 2.5, date: '2021-08-30', gpx: '' }),
+    record('4', { name: 'Unknown', tiers: [{ price: 3 }, { price: 9 }] }),
+  ]
+  const kept = (where: unknown) =>
+    names(trips.filter((item) => matchesWhere(item, parseWhere(where))))
+
+  test('min and max keep numbers within the bound, inclusive, and drop missing values', () => {
+    expect(kept({ stars: { min: 4 } })).toEqual(['Ski Tour', 'Scramble'])
+    expect(kept({ stars: { max: 4 } })).toEqual(['Scramble', 'Walk'])
+    expect(kept({ stars: { min: 3, max: 4.5 } })).toEqual(['Scramble'])
+  })
+
+  test('min and max compare text with text, so dates written YYYY-MM-DD bound by date', () => {
+    expect(kept({ date: { min: '2020-01-01' } })).toEqual(['Scramble', 'Walk'])
+    expect(kept({ stars: { min: '3' } })).toEqual([])
+  })
+
+  test('contains matches part of the text, ignoring case, and a list means any of them', () => {
+    expect(kept({ activity: { contains: 'ski' } })).toEqual(['Ski Tour'])
+    expect(kept({ activity: { contains: ['SKI', 'hike'] } })).toEqual(['Ski Tour', 'Walk'])
+    expect(kept({ date: { contains: '-08-' } })).toEqual(['Ski Tour', 'Walk'])
+  })
+
+  test('not keeps every record whose value is none of the listed ones, missing included', () => {
+    expect(kept({ activity: { not: ['Scramble', 'Hike'] } })).toEqual(['Ski Tour', 'Unknown'])
+    expect(kept({ activity: { not: null } })).toEqual(['Ski Tour', 'Scramble', 'Walk'])
+  })
+
+  test('present tells a value from a missing one, empty text counting as missing', () => {
+    expect(kept({ gpx: { present: true } })).toEqual(['Ski Tour'])
+    expect(kept({ gpx: { present: false } })).toEqual(['Scramble', 'Walk', 'Unknown'])
+    expect(kept({ 'tiers.1': { present: true } })).toEqual(['Unknown'])
+  })
+
+  test('is is the plain form, and unknown operators or empty operands add no test', () => {
+    expect(parseWhere({ activity: { is: 'Hike' } })).toEqual(parseWhere({ activity: 'Hike' }))
+    expect(parseWhere({ activity: { near: 'Hike', contains: [] }, stars: { min: 'x' } })).toEqual([
+      { path: ['stars'], test: { kind: 'min', value: 'x' } },
+    ])
+  })
+})
+
 describe('search', () => {
   test('every term must appear in some field, ignoring case', () => {
     const terms = searchTerms('  BANFF  osm ')

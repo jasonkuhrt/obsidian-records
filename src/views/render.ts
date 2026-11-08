@@ -1,5 +1,5 @@
 import { formatText, valueParts, type Part } from '../core/format.ts'
-import { isGeometry, isPlainObject } from '../core/path.ts'
+import { isGeometry, isPlainObject, type Path } from '../core/path.ts'
 
 /** Appends a value's parts to `el`, separated by commas. */
 export const renderParts = (el: HTMLElement, parts: readonly Part[]): void => {
@@ -23,13 +23,24 @@ export const renderValue = (el: HTMLElement, value: unknown): void => {
 const isScalarList = (value: readonly unknown[]): boolean =>
   value.every((item) => item === null || typeof item !== 'object')
 
-/** Every field of a record, nested objects and lists of objects expanded under their key. */
-export const renderFields = (el: HTMLElement, data: Readonly<Record<string, unknown>>): void => {
+/**
+ * Every field of a record, nested objects and lists of objects expanded under
+ * their key and a list of values one item per line. The field at `skip` is
+ * left out: a detail renders it as Markdown instead.
+ */
+export const renderFields = (
+  el: HTMLElement,
+  data: Readonly<Record<string, unknown>>,
+  skip: Path | null = null,
+): void => {
   const list = el.createEl('dl', { cls: 'records-fields' })
   for (const [key, value] of Object.entries(data)) {
+    const skipped = skip?.[0] === key
+    if (skipped && skip.length === 1) continue
     list.createEl('dt', { text: key })
     const cell = list.createEl('dd')
-    if (isPlainObject(value) && !isGeometry(value)) renderFields(cell, value)
+    if (isPlainObject(value) && !isGeometry(value))
+      renderFields(cell, value, skipped ? skip.slice(1) : null)
     else if (Array.isArray(value) && !isScalarList(value))
       value.forEach((item, index) => {
         if (isPlainObject(item) && !isGeometry(item)) {
@@ -39,6 +50,8 @@ export const renderFields = (el: HTMLElement, data: Readonly<Record<string, unkn
       })
     else if (valueParts(value).length === 0)
       cell.createSpan({ text: '—', cls: 'records-tone-muted' })
+    else if (Array.isArray(value))
+      for (const item of value) renderValue(cell.createDiv({ cls: 'records-fields-item' }), item)
     else renderValue(cell, value)
   }
 }

@@ -1,7 +1,9 @@
 import {
   BasesView,
+  Component,
   debounce,
   FileSystemAdapter,
+  MarkdownRenderer,
   parseYaml,
   setIcon,
   type App,
@@ -73,6 +75,8 @@ export abstract class RecordsView extends BasesView {
   private configSnapshot = ''
   private sourcesSnapshot = ''
   private loadToken = 0
+  /** Owns what the detail's Markdown rendered, so closing the detail releases it. */
+  private detailContent: Component | null = null
 
   constructor(controller: QueryController, containerEl: HTMLElement, host: RecordsHost) {
     super(controller)
@@ -195,6 +199,15 @@ export abstract class RecordsView extends BasesView {
     this.renderTimed()
   }
 
+  /** A vault file's text, dot folders included; `null` when it can't be read. */
+  protected async readText(path: string): Promise<string | null> {
+    try {
+      return await sourceFs(this.host.app).read(path)
+    } catch {
+      return null
+    }
+  }
+
   /** The records of one source, empty until it loads. */
   protected recordsOf(source: string | null): readonly DataRecord[] {
     return source === null ? [] : (this.sources.get(normalizeSource(source))?.records ?? [])
@@ -228,9 +241,15 @@ export abstract class RecordsView extends BasesView {
     if (problems.length > 5) this.problemsEl.createDiv({ text: `…and ${problems.length - 5} more` })
   }
 
-  protected showDetail(record: DataRecord, title: string): void {
+  /**
+   * Opens the side panel with a header of `title` and `subtitle` and returns
+   * the element below it, emptied, for the caller to fill.
+   */
+  protected openPanel(title: string, subtitle: string): HTMLElement {
+    this.releaseDetail()
     const detail = this.detailEl
     detail.empty()
+    detail.removeClass('has-markdown')
     detail.addClass('is-open')
     const header = detail.createDiv({ cls: 'records-detail-header' })
     header.createDiv({ cls: 'records-detail-title', text: title })
@@ -242,12 +261,36 @@ export abstract class RecordsView extends BasesView {
     close.addEventListener('click', () => {
       this.hideDetail()
     })
-    detail.createDiv({ cls: 'records-detail-file', text: record.id })
-    renderFields(detail.createDiv({ cls: 'records-detail-body' }), record.data)
+    detail.createDiv({ cls: 'records-detail-file', text: subtitle })
+    return detail
+  }
+
+  /**
+   * Shows every field of `record` in the side panel. The field at `body`, when
+   * it holds text, is rendered as Markdown below the others, its links
+   * resolving from the record's file.
+   */
+  protected showDetail(record: DataRecord, title: string, body: Path | null = null): void {
+    const detail = this.openPanel(title, record.id)
+    renderFields(detail.createDiv({ cls: 'records-detail-body' }), record.data, body)
+    const markdown = body === null ? undefined : getAt(record.data, body)
+    if (typeof markdown !== 'string' || markdown.trim() === '') return
+    detail.addClass('has-markdown')
+    const content = new Component()
+    this.detailContent = this.addChild(content)
+    const el = detail.createDiv({ cls: 'records-detail-markdown markdown-rendered' })
+    void MarkdownRenderer.render(this.host.app, markdown, el, record.file, content)
   }
 
   protected hideDetail(): void {
+    this.releaseDetail()
     this.detailEl.removeClass('is-open')
     this.detailEl.empty()
+  }
+
+  private releaseDetail(): void {
+    if (this.detailContent === null) return
+    this.removeChild(this.detailContent)
+    this.detailContent = null
   }
 }

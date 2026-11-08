@@ -1,5 +1,5 @@
 import { isPlainObject, parsePath, type Path } from './path.ts'
-import type { Direction, Scalar, SortKey, Where } from './query.ts'
+import type { Direction, Scalar, SortKey, Test, Where, WhereCondition } from './query.ts'
 
 /** Reads one key of a view's entry in the `.base` file, as `BasesViewConfig.get` does. */
 export type ConfigGet = (key: string) => unknown
@@ -12,6 +12,8 @@ export interface ListConfig {
   readonly groupBy: SortKey | null
   readonly where: Where
   readonly title: Path
+  /** A field of Markdown text that a record's detail renders below its other fields. */
+  readonly body: Path | null
 }
 
 export type Coordinates =
@@ -30,6 +32,11 @@ export interface MapLayerConfig {
   /** Pin colors by the `colorBy` value, written as text (`true`, `permitted`). */
   readonly colors: Readonly<Record<string, string>>
   readonly color: string | null
+  readonly body: Path | null
+  /** A field holding the path of a record's GPX track. */
+  readonly track: Path | null
+  /** The vault folder a relative track path starts from; without it, the record's own folder. */
+  readonly trackRoot: string | null
 }
 
 export interface MapConfig {
@@ -38,6 +45,8 @@ export interface MapConfig {
   /** Where the map opens; without it, the map frames every pin. */
   readonly center: readonly [lat: number, lon: number] | null
   readonly zoom: number | null
+  /** From this zoom in, the map draws the tracks of the records in view. */
+  readonly trackZoom: number
 }
 
 const asString = (value: unknown): string | null =>
@@ -76,13 +85,57 @@ export const parseGroupBy = (value: unknown): SortKey | null => asSortKey(value)
 const isScalar = (value: unknown): value is Scalar =>
   value === null || ['string', 'number', 'boolean'].includes(typeof value)
 
-/** `{ <path>: <value> | [<value>, …] }`: every path must hold one of its values. */
+const asScalars = (value: unknown): Scalar[] =>
+  (Array.isArray(value) ? value : [value]).filter(isScalar)
+
+const asBound = (value: unknown): number | string | null =>
+  typeof value === 'number' && Number.isFinite(value)
+    ? value
+    : typeof value === 'string'
+      ? value
+      : null
+
+/** The tests an operator object names, as in `{ min: 4.5 }` or `{ contains: [Ski, Snow] }`. */
+const asTests = (operators: Record<string, unknown>): Test[] =>
+  Object.entries(operators).flatMap(([operator, operand]): Test[] => {
+    switch (operator) {
+      case 'is':
+      case 'not': {
+        const values = asScalars(operand)
+        return values.length === 0 ? [] : [{ kind: operator, values }]
+      }
+      case 'contains': {
+        const texts = asScalars(operand).flatMap((item) =>
+          item === null || item === '' ? [] : [String(item)],
+        )
+        return texts.length === 0 ? [] : [{ kind: 'contains', texts }]
+      }
+      case 'min':
+      case 'max': {
+        const value = asBound(operand)
+        return value === null ? [] : [{ kind: operator, value }]
+      }
+      case 'present':
+        return typeof operand === 'boolean' ? [{ kind: 'present', value: operand }] : []
+      default:
+        return []
+    }
+  })
+
+/**
+ * `{ <path>: <value> | [<value>, …] | { <operator>: <operand>, … } }`. A value
+ * or list keeps the records whose value is one of them; an operator object
+ * applies each of its tests (`is`, `not`, `contains`, `min`, `max`,
+ * `present`). Every condition must hold.
+ */
 export const parseWhere = (value: unknown): Where => {
   if (!isPlainObject(value)) return []
-  return Object.entries(value).flatMap(([key, expected]) => {
+  return Object.entries(value).flatMap(([key, expected]): WhereCondition[] => {
     const path = parsePath(key)
-    const values = (Array.isArray(expected) ? expected : [expected]).filter(isScalar)
-    return path.length === 0 || values.length === 0 ? [] : [{ path, values }]
+    if (path.length === 0) return []
+    if (isPlainObject(expected)) return asTests(expected).map((test) => ({ path, test }))
+    const values = asScalars(expected)
+    return values.length === 0 ? [] : [{ path, test: { kind: 'is', values } }]
   })
 }
 
@@ -114,6 +167,7 @@ export const parseListConfig = (get: ConfigGet): ListConfig => ({
   groupBy: parseGroupBy(get('groupBy')),
   where: parseWhere(get('where')),
   title: asPath(get('title')) ?? defaultTitle,
+  body: asPath(get('body')),
 })
 
 const parseLayer = (get: ConfigGet, fallbackName: string): MapLayerConfig => {
@@ -128,15 +182,17 @@ const parseLayer = (get: ConfigGet, fallbackName: string): MapLayerConfig => {
     colorBy: asPath(get('colorBy')),
     colors: parseColors(get('colors')),
     color: asString(get('color')),
+    body: asPath(get('body')),
+    track: asPath(get('track')),
+    trackRoot: asString(get('trackRoot')),
   }
 }
 
-/**
- * A map view is one layer written on the view itself, or several under
- * `layers`, each with the same keys plus a `name`.
- */
 const asNumber = (value: unknown): number | null =>
   typeof value === 'number' && Number.isFinite(value) ? value : null
+
+/** The zoom tracks appear from when a view names none: a few kilometres across. */
+export const defaultTrackZoom = 12
 
 const parseCenter = (value: unknown): readonly [number, number] | null => {
   if (!Array.isArray(value) || value.length !== 2) return null
@@ -145,12 +201,17 @@ const parseCenter = (value: unknown): readonly [number, number] | null => {
   return lat === null || lon === null ? null : [lat, lon]
 }
 
+/**
+ * A map view is one layer written on the view itself, or several under
+ * `layers`, each with the same keys plus a `name`.
+ */
 export const parseMapConfig = (get: ConfigGet): MapConfig => {
   const layers = get('layers')
   const view = {
     tiles: asString(get('tiles')),
     center: parseCenter(get('center')),
     zoom: asNumber(get('zoom')),
+    trackZoom: asNumber(get('trackZoom')) ?? defaultTrackZoom,
   }
   if (Array.isArray(layers))
     return {
