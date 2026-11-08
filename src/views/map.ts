@@ -437,7 +437,7 @@ export class MapView extends RecordsView {
       const entry: DrawnOutline = { layer, of }
       layer.on('click', () => {
         const { record, layer: config } = entry.of
-        this.showDetail(record, titleOf(record, config.title), config.body)
+        this.showDetail(record, (r) => titleOf(r, config.title), config.body)
       })
       this.drawnOutlines.set(key, entry)
       this.outlines.addLayer(layer)
@@ -477,7 +477,7 @@ export class MapView extends RecordsView {
 
   /** Shows a pin's record and draws its track. */
   private select(pin: Pin): void {
-    this.showDetail(pin.record, titleOf(pin.record, pin.layer.title), pin.layer.body)
+    this.showDetail(pin.record, (r) => titleOf(r, pin.layer.title), pin.layer.body)
     this.selected = pin.key
     this.revealSelected = true
     void this.drawTracks()

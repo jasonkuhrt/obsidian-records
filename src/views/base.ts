@@ -82,6 +82,12 @@ export abstract class RecordsView extends BasesView {
   private loadToken = 0
   /** Owns what the detail's Markdown rendered, so closing the detail releases it. */
   private detailContent: Component | null = null
+  /** The record the open detail panel shows, so a reload can redraw it. */
+  private openDetail: {
+    id: string
+    titleFor: (record: DataRecord) => string
+    body: Path | null
+  } | null = null
 
   constructor(controller: QueryController, containerEl: HTMLElement, host: RecordsHost) {
     super(controller)
@@ -202,6 +208,18 @@ export abstract class RecordsView extends BasesView {
     this.root.dataset['loadMs'] = String(Math.round(performance.now() - started))
     this.renderProblems(loaded)
     this.render()
+    this.refreshDetail()
+  }
+
+  /** After a reload, an open detail panel shows its record's new values, or closes when the record is gone. */
+  private refreshDetail(): void {
+    const open = this.openDetail
+    if (open === null || !this.detailEl.hasClass('is-open')) return
+    const record = [...this.sources.values()]
+      .flatMap((source) => source.records)
+      .find((r) => r.id === open.id)
+    if (record === undefined) this.hideDetail()
+    else this.showDetail(record, open.titleFor, open.body)
   }
 
   /** A vault file's text, dot folders included; `null` when it can't be read. */
@@ -253,6 +271,7 @@ export abstract class RecordsView extends BasesView {
    * the element below it, emptied, for the caller to fill.
    */
   protected openPanel(title: string, subtitle: string): HTMLElement {
+    this.openDetail = null
     this.releaseDetail()
     const detail = this.detailEl
     detail.empty()
@@ -277,8 +296,13 @@ export abstract class RecordsView extends BasesView {
    * it holds text, is rendered as Markdown below the others, its links
    * resolving from the record's file.
    */
-  protected showDetail(record: DataRecord, title: string, body: Path | null = null): void {
-    const detail = this.openPanel(title, record.id)
+  protected showDetail(
+    record: DataRecord,
+    titleFor: (record: DataRecord) => string,
+    body: Path | null = null,
+  ): void {
+    const detail = this.openPanel(titleFor(record), record.id)
+    this.openDetail = { id: record.id, titleFor, body }
     renderFields(detail.createDiv({ cls: 'records-detail-body' }), record.data, body)
     const markdown = body === null ? undefined : getAt(record.data, body)
     if (typeof markdown !== 'string' || markdown.trim() === '') return
@@ -290,6 +314,7 @@ export abstract class RecordsView extends BasesView {
   }
 
   protected hideDetail(): void {
+    this.openDetail = null
     this.releaseDetail()
     this.detailEl.removeClass('is-open')
     this.detailEl.empty()
