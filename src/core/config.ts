@@ -36,6 +36,13 @@ export interface ListConfig {
   readonly title: Path
   /** A field of Markdown text that a record's detail renders below its other fields. */
   readonly body: Path | null
+  /**
+   * A Bases formula evaluated for the page the view sits on, such as
+   * `this.file.basename`; the view keeps the records where one of
+   * `matchFields` holds its value.
+   */
+  readonly match: string | null
+  readonly matchFields: readonly Path[]
 }
 
 export type Coordinates =
@@ -194,6 +201,8 @@ export const parseListConfig = (get: ConfigGet): ListConfig => ({
   where: parseWhere(get('where')),
   title: asPath(get('title')) ?? defaultTitle,
   body: asPath(get('body')),
+  match: asString(get('match')),
+  matchFields: asPaths(get('matchFields')),
 })
 
 const parseLayer = (get: ConfigGet, fallbackName: string): MapLayerConfig => {

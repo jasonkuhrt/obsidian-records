@@ -1,7 +1,8 @@
 import { parseListConfig, type ListConfig } from '../core/config.ts'
 import { fieldsOf, formatText } from '../core/format.ts'
+import { pageValues } from '../core/page.ts'
 import type { Path } from '../core/path.ts'
-import { groupRecords, runQuery, type Group, type SortKey } from '../core/query.ts'
+import { groupRecords, runQuery, type Group, type PageMatch, type SortKey } from '../core/query.ts'
 import { RecordsView } from './base.ts'
 import type { VirtualList } from './virtual-list.ts'
 
@@ -23,8 +24,23 @@ export abstract class ListView extends RecordsView {
     return source === null ? [] : [source]
   }
 
+  /**
+   * The page this view keeps records for, when its `match` names one. Bases
+   * evaluates the formula against the note the view is embedded in, or, in the
+   * sidebar, the open note; opened on its own, against the `.base` file.
+   */
+  protected pageMatch(settings: ListConfig): PageMatch | null {
+    if (settings.match === null) return null
+    return {
+      fields: settings.matchFields,
+      values: pageValues(this.config.getEvaluatedFormula(this, 'match')),
+    }
+  }
+
+  /** Includes the page's values, so a sidebar view redraws when another note opens. */
   protected override configKey(): string {
-    return JSON.stringify(this.settings())
+    const settings = this.settings()
+    return JSON.stringify({ ...settings, page: this.pageMatch(settings) })
   }
 
   protected override labelled(): readonly Path[] {
@@ -45,8 +61,10 @@ export abstract class ListView extends RecordsView {
   /** The groups to draw: one unnamed group when the view has no `groupBy`. */
   protected groups(settings: ListConfig): { groups: Group[]; shown: number; total: number } {
     const records = this.recordsOf(settings.source)
+    const page = this.pageMatch(settings)
     const rows = runQuery(records, {
       where: settings.where,
+      page,
       search: this.search,
       sort: this.effectiveSort(settings),
     })
@@ -55,9 +73,9 @@ export abstract class ListView extends RecordsView {
         ? [{ value: undefined, records: rows }]
         : groupRecords(rows, settings.groupBy)
     const whereCount =
-      settings.where.length === 0
+      settings.where.length === 0 && page === null
         ? records.length
-        : runQuery(records, { where: settings.where, search: '', sort: [] }).length
+        : runQuery(records, { where: settings.where, page, search: '', sort: [] }).length
     return { groups, shown: rows.length, total: whereCount }
   }
 

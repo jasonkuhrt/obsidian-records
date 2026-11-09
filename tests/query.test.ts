@@ -3,6 +3,7 @@ import { parseListConfig, parseWhere } from '../src/core/config.ts'
 import { getAt, parsePath } from '../src/core/path.ts'
 import {
   groupRecords,
+  matchesPage,
   matchesSearch,
   matchesWhere,
   runQuery,
@@ -263,5 +264,44 @@ describe('runQuery', () => {
       sort: [{ path: ['name'], direction: 'DESC' }],
     })
     expect(names(rows)).toEqual(['Park 10', 'Park 9'])
+  })
+})
+
+describe('page match', () => {
+  const orders = [
+    record('jj', { name: 'jj', merchant: 'jj-cards', for: 'roman', ship_to: 'jason' }),
+    record('lego', { name: 'lego', merchant: 'lego', ship_to: 'jason' }),
+    record('gift', { name: 'gift', merchant: 'lego', for: ['roman', 'willem'] }),
+  ]
+  const fields = [['for'], ['ship_to'], ['merchant']]
+
+  test('keeps the records where any of the fields names the page, lists included', () => {
+    expect(
+      names(orders.filter((item) => matchesPage(item, { fields, values: ['roman'] }))),
+    ).toEqual(['jj', 'gift'])
+    expect(
+      names(orders.filter((item) => matchesPage(item, { fields, values: ['jason'] }))),
+    ).toEqual(['jj', 'lego'])
+    expect(names(orders.filter((item) => matchesPage(item, { fields, values: ['lego'] })))).toEqual(
+      ['lego', 'gift'],
+    )
+  })
+
+  test('a page with no value, or a match with no fields, keeps no record; no match keeps all', () => {
+    expect(orders.filter((item) => matchesPage(item, { fields, values: [] }))).toEqual([])
+    expect(orders.filter((item) => matchesPage(item, { fields: [], values: ['roman'] }))).toEqual(
+      [],
+    )
+    expect(orders.filter((item) => matchesPage(item, null))).toHaveLength(3)
+  })
+
+  test('runQuery applies the page with where and search', () => {
+    const rows = runQuery(orders, {
+      where: parseWhere({ merchant: 'lego' }),
+      page: { fields, values: ['roman'] },
+      search: '',
+      sort: [],
+    })
+    expect(names(rows)).toEqual(['gift'])
   })
 })

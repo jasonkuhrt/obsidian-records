@@ -34,15 +34,17 @@ reads its source when it opens. The refresh button in the view, or the command
 `type: records` is a table and `type: records-cards` shows the same rows as
 cards.
 
-| Key       | Meaning                                                                                                                               |
-| --------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| `source`  | The folder or file of records.                                                                                                        |
-| `order`   | The fields shown, in order. A nested field is a path: `wildernessCamping.status`. Without it, every top-level field the records have. |
-| `sort`    | The default sort, as in Bases. Clicking a column heading sorts by it; a second click reverses.                                        |
-| `groupBy` | `{ property, direction }`, as in Bases.                                                                                               |
-| `where`   | Which records the view keeps; see below.                                                                                              |
-| `title`   | The field that names a record in cards and in its detail panel. Defaults to `name`.                                                   |
-| `body`    | A field of Markdown text, such as a trip report, rendered below the other fields in the detail.                                       |
+| Key           | Meaning                                                                                                                               |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `source`      | The folder or file of records.                                                                                                        |
+| `order`       | The fields shown, in order. A nested field is a path: `wildernessCamping.status`. Without it, every top-level field the records have. |
+| `sort`        | The default sort, as in Bases. Clicking a column heading sorts by it; a second click reverses.                                        |
+| `groupBy`     | `{ property, direction }`, as in Bases.                                                                                               |
+| `where`       | Which records the view keeps; see below.                                                                                              |
+| `title`       | The field that names a record in cards and in its detail panel. Defaults to `name`.                                                   |
+| `body`        | A field of Markdown text, such as a trip report, rendered below the other fields in the detail.                                       |
+| `match`       | A formula naming the page the view sits on, such as `this.file.basename`; see Match the page.                                         |
+| `matchFields` | The fields of which one must hold `match`'s value.                                                                                    |
 
 The search box matches every field of a record; each word must appear
 somewhere. Clicking a row or card shows all of the record's fields, and the
@@ -71,6 +73,31 @@ for a missing value: `status: [operational, null]`. An empty list keeps no
 record. `min` and `max` compare numbers with numbers and text with text, so
 `date: { min: "2020-01-01" }` bounds dates written `YYYY-MM-DD`. An index is a
 path step: `tiers.1: { present: true }` keeps the records with a second tier.
+
+## Match the page
+
+A table or cards view embedded in a note can keep only the records that name
+that note. `match` is a Bases formula, and `matchFields` the fields of which
+one must hold its value.
+
+```yaml
+# Orders.base, embedded as ![[Orders.base]] on People/roman.md
+views:
+  - type: records
+    name: For this page
+    source: .machinery/records/orders
+    match: this.file.basename # "roman"
+    matchFields: [for, ship_to, merchant]
+```
+
+Bases evaluates `match` the way it evaluates `this` in a filter: against the
+note the view is embedded in, against the open note when the Base is in the
+sidebar, and against the `.base` file itself when it is opened on its own.
+A formula that gives a list matches any of its items, so `this.aliases` works
+too. A list in a record passes when one of its items matches. A page for which
+the formula gives no value keeps no record, and so does a `match` without
+`matchFields`. `match` combines with `where` and the search; the count reads
+"N records" against the records that match the page.
 
 ## Map
 

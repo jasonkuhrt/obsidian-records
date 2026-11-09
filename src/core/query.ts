@@ -83,6 +83,21 @@ const passes = (value: unknown, test: Test): boolean => {
 export const matchesWhere = (record: DataRecord, where: Where): boolean =>
   where.every((condition) => passes(getAt(record.data, condition.path), condition.test))
 
+/**
+ * The records that name the page a view sits on: one of `fields` holds one of
+ * `values`, the values the view's `match` formula gave for that page.
+ */
+export interface PageMatch {
+  readonly fields: readonly Path[]
+  readonly values: readonly string[]
+}
+
+/** No match keeps every record; a match with no values or no fields keeps none. */
+export const matchesPage = (record: DataRecord, match: PageMatch | null): boolean =>
+  match === null ||
+  (match.values.length > 0 &&
+    match.fields.some((path) => isOneOf(getAt(record.data, path), match.values)))
+
 export const searchTerms = (query: string): string[] =>
   query
     .toLowerCase()
@@ -174,15 +189,23 @@ export const groupRecords = (records: readonly DataRecord[], by: SortKey): Group
 
 export interface Query {
   readonly where: Where
+  /** The page the view sits on, when its `match` names one. */
+  readonly page?: PageMatch | null
   readonly search: string
   readonly sort: readonly SortKey[]
 }
 
-/** The rows a view shows: those matching `where` and the search, in sort order. */
+/** The rows a view shows: those matching `where`, the page and the search, in sort order. */
 export const runQuery = (records: readonly DataRecord[], query: Query): DataRecord[] => {
   const terms = searchTerms(query.search)
+  const page = query.page ?? null
   return sortRecords(
-    records.filter((record) => matchesWhere(record, query.where) && matchesSearch(record, terms)),
+    records.filter(
+      (record) =>
+        matchesWhere(record, query.where) &&
+        matchesPage(record, page) &&
+        matchesSearch(record, terms),
+    ),
     query.sort,
   )
 }

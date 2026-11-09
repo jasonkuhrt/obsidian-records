@@ -39,7 +39,27 @@ where: { backcountry: true, reservation: [reservation, both] }
       ],
       title: ['name'],
       body: null,
+      match: null,
+      matchFields: [],
     })
+  })
+
+  test('read the page a view matches: a formula and the fields that must hold its value', () => {
+    const settings = parseListConfig(
+      view(`
+source: .machinery/records/orders
+match: this.file.basename
+matchFields: [for, ship_to, merchant, shipment.carrier]
+`),
+    )
+    expect(settings.match).toBe('this.file.basename')
+    expect(settings.matchFields).toEqual([
+      ['for'],
+      ['ship_to'],
+      ['merchant'],
+      ['shipment', 'carrier'],
+    ])
+    expect(parseListConfig(view(`match: "  "`)).match).toBeNull()
   })
 
   test('accept what Bases writes back and fill in defaults', () => {
